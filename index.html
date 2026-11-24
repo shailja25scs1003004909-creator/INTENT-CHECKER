@@ -1,0 +1,193 @@
+!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intent Checker</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 20px auto; padding: 0 16px; line-height: 1.5; }
+    textarea { width: 100%; min-height: 90px; padding: 8px; box-sizing: border-box; font: inherit; }
+    input { width: 100%; padding: 6px; box-sizing: border-box; font: inherit; }
+    button { padding: 6px 12px; margin: 4px 4px 4px 0; cursor: pointer; }
+    li { margin: 8px 0; }
+    .on-ok { background: #1e8a4c; color: #fff; }
+    .on-bad { background: #c0392b; color: #fff; }
+    .cols { display: flex; gap: 12px; flex-wrap: wrap; }
+    .cols > div { flex: 1; min-width: 260px; }
+    .hidden { display: none; }
+    #msg { color: #c0392b; }
+    #demo { background: #fff6e0; padding: 8px 12px; border-radius: 6px; }
+    #answer { white-space: pre-wrap; background: #f1f2f8; padding: 12px; border-radius: 6px; }
+    section { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Intent Checker</h1>
+  <p id="demo" class="hidden">Demo mode: no AI server reached, so these are example answers, not real AI output.</p>
+ 
+  <label for="request">Your request</label>
+  <textarea id="request" placeholder="e.g. give me notes for tomorrow's networking practical"></textarea>
+  <button id="checkBtn">Check understanding</button>
+  <span id="msg"></span>
+ 
+  <section id="result" class="hidden">
+    <h2>How the AI understood this</h2>
+    <p id="restatement"></p>
+    <h3>Assumptions (mark each)</h3>
+    <ul id="assumptions"></ul>
+    <h3>Questions (answer them)</h3>
+    <ul id="questions"></ul>
+    <button id="buildBtn">Build improved prompt</button>
+    <button id="runBtn1" class="hidden">Looks right: run the request</button>
+  </section>
+ 
+  <section id="compare" class="hidden">
+    <h2>Original vs improved prompt</h2>
+    <div class="cols">
+      <div><b>Original</b><textarea id="orig" readonly></textarea></div>
+      <div><b>Improved (you can edit)</b><textarea id="revised" style="min-height:200px"></textarea></div>
+    </div>
+    <button id="recheckBtn">Re-check understanding of improved prompt</button>
+  </section>
+ 
+  <section id="answerBox" class="hidden">
+    <h2>Answer</h2>
+    <div id="answer"></div>
+  </section>
+ 
+<script>
+var $ = function (id) { return document.getElementById(id); };
+var cache = {};
+var marks = [];
+var data = null;
+var isRevised = false;   // true after the user re-checks the improved prompt
+ 
+// ---------- demo-mode fallbacks (used when the server is unreachable) ----------
+function mock(path, b) {
+  if (path === '/api/understand') {
+    return {
+      restatement: 'You want help with: ' + b.request.slice(0, 90),
+      assumptions: ['You want a finished result, not guidance', 'You already know the basics of the topic', 'Short and quick is preferred'],
+      questions: ['What exactly should the output look like?', 'How much time or detail do you have?']
+    };
+  }
+  if (path === '/api/improve') {
+    var lines = ['Role: You are a helpful expert assistant.', 'Goal: ' + b.request, 'Context:'];
+    b.answers.forEach(function (x) { lines.push('- ' + x.q + ' ' + x.a); });
+    if (!b.answers.length) lines.push('- (none given)');
+    lines.push('Constraints:');
+    b.wrong.forEach(function (w) { lines.push('- Do not assume: ' + w); });
+    if (!b.wrong.length) lines.push('- (none given)');
+    lines.push('Output format: Clear, structured, concise.');
+    return { prompt: lines.join('\n') };
+  }
+  return { answer: 'DEMO ANSWER: a real model would respond to your improved prompt here.' };
+}
+ 
+async function post(path, body) {
+  var key = path + JSON.stringify(body);
+  if (cache[key]) return cache[key];   // same input = no new API call
+  var out;
+  try {
+    var r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    out = await r.json();
+    if (!r.ok) throw new Error(out.error || 'error');
+  } catch (e) {
+    out = mock(path, body);
+    $('demo').classList.remove('hidden');
+  }
+  cache[key] = out;
+  return out;
+}
+ 
+async function busy(btn, label, fn) {
+  var old = btn.textContent;
+  btn.disabled = true; btn.textContent = label;
+  try { await fn(); } finally { btn.disabled = false; btn.textContent = old; }
+}
+ 
+// ---------- step 1: check understanding ----------
+async function check() {
+  var request = $('request').value.trim();
+  $('msg').textContent = '';
+  if (request.length < 10) { $('msg').textContent = 'Please add more detail.'; return; }
+  data = await post('/api/understand', { request: request });
+  render();
+}
+$('checkBtn').onclick = function () {
+  isRevised = false;
+  busy($('checkBtn'), 'Checking...', check);
+};
+$('request').oninput = function () { isRevised = false; };
+ 
+function render() {
+  $('restatement').textContent = data.restatement;
+  marks = data.assumptions.map(function () { return null; });
+ 
+  var ul = $('assumptions'); ul.textContent = '';
+  data.assumptions.forEach(function (text, i) {
+    var li = document.createElement('li');
+    li.appendChild(document.createTextNode(text + ' '));
+    var ok = document.createElement('button'); ok.textContent = 'Correct';
+    var bad = document.createElement('button'); bad.textContent = 'Wrong';
+    ok.onclick = function () { marks[i] = 'ok'; ok.className = 'on-ok'; bad.className = ''; };
+    bad.onclick = function () { marks[i] = 'bad'; bad.className = 'on-bad'; ok.className = ''; };
+    li.appendChild(ok); li.appendChild(bad);
+    ul.appendChild(li);
+  });
+ 
+  var qs = $('questions'); qs.textContent = '';
+  data.questions.forEach(function (text) {
+    var li = document.createElement('li');
+    li.appendChild(document.createTextNode(text));
+    var input = document.createElement('input');
+    li.appendChild(input);
+    qs.appendChild(li);
+  });
+ 
+  $('result').classList.remove('hidden');
+  // after the improved prompt was re-checked, offer to run it
+  $('runBtn1').classList.toggle('hidden', !isRevised);
+  $('buildBtn').classList.toggle('hidden', isRevised);
+  $('answerBox').classList.add('hidden');
+}
+ 
+// ---------- step 2: AI writes an improved prompt ----------
+$('buildBtn').onclick = function () {
+  busy($('buildBtn'), 'Improving...', async function () {
+    var wrong = [];
+    data.assumptions.forEach(function (a, i) { if (marks[i] === 'bad') wrong.push(a); });
+    var inputs = $('questions').querySelectorAll('input');
+    var answers = [];
+    data.questions.forEach(function (q, i) {
+      var a = inputs[i].value.trim();
+      if (a) answers.push({ q: q, a: a });
+    });
+    var out = await post('/api/improve', { request: $('request').value.trim(), wrong: wrong, answers: answers });
+    $('orig').value = $('request').value;
+    $('revised').value = out.prompt;
+    $('compare').classList.remove('hidden');
+    $('compare').scrollIntoView();
+  });
+};
+ 
+// ---------- step 3: re-check the improved prompt ----------
+$('recheckBtn').onclick = function () {
+  $('request').value = $('revised').value;
+  isRevised = true;
+  busy($('recheckBtn'), 'Checking...', check);
+};
+ 
+// ---------- step 4: run the final request ----------
+$('runBtn1').onclick = function () {
+  busy($('runBtn1'), 'Running...', async function () {
+    var out = await post('/api/run', { prompt: $('request').value.trim() });
+    $('answer').textContent = out.answer;
+    $('answerBox').classList.remove('hidden');
+    $('answerBox').scrollIntoView();
+  });
+};
+</script>
+</body>
+</html>
+ 

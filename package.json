@@ -1,0 +1,5 @@
+{
+    "name": "intent-checker",
+    "scripts": { "start": "node server.js" },
+    "engines": { "node": ">=18" }
+  }
